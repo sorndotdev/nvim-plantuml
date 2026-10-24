@@ -7,9 +7,9 @@
 --
 -- Renders the first @start/@end block of a .puml buffer with a persistent
 -- `plantuml -pipe` process and shows the PNG via snacks.image. With the default
--- `layout = 'inline'` the diagram replaces the code in the same window while in
--- normal mode, and the code comes back for insert mode. `layout = 'split'` shows
--- the diagram in a split next to the code instead.
+-- `layout = 'inline'` the diagram covers the code window in normal mode, except
+-- for the cursor line on its top row, and goes away in insert mode.
+-- `layout = 'split'` shows the diagram in a split next to the code instead.
 --
 -- Rendering needs a PlantUML jar (run through `java`). The jar is downloaded on
 -- demand into `stdpath('data')/plantuml/` via :PlantUMLInstall, or you can point
@@ -43,8 +43,9 @@ M.config = {
     -- Path to GraphViz `dot` (needed by some diagram types). Auto-detected.
     graphviz = nil,
     args = { '-pipe', '-tpng', '-nometadata' },
-    -- 'inline': normal mode shows the diagram, insert mode shows the code, in the
-    -- same window. 'split': the diagram is shown in a split next to the code.
+    -- 'inline': in normal mode the diagram covers the code window except for the
+    -- cursor line; insert mode shows the code. 'split': the diagram is shown in a
+    -- split next to the code.
     layout = 'inline',
     position = 'right',
     size = 0.4,
@@ -59,8 +60,6 @@ M.config = {
 }
 
 local IEND = '\0\0\0\0IEND\xae\x42\x60\x82'
--- Keys that, pressed on the inline diagram, bring the code back and start insert.
-local INSERT_KEYS = { 'i', 'a', 'I', 'A', 'o', 'O', 's', 'S', 'C' }
 local states = {}
 local render
 local show_diagram
@@ -720,96 +719,83 @@ local function after_show(state)
 end
 
 local function inline_shown(state)
-    local win = state.inline_win
-    return win and vim.api.nvim_win_is_valid(win) and state.preview_buf
-        and vim.api.nvim_win_get_buf(win) == state.preview_buf
+    return state.float_win ~= nil and vim.api.nvim_win_is_valid(state.float_win)
 end
 
--- Put the code back in the window that shows the inline diagram, then feed
--- `keys` (e.g. `i`) so the user lands in insert mode.
-local function show_code(state, keys)
-    if not inline_shown(state) or not vim.api.nvim_buf_is_valid(state.src_buf) then
+-- Redraw now and again once the image delete has reached the terminal. WezTerm
+-- keeps showing the old picture for rows the image covered until a full redraw
+-- arrives after the delete.
+local function redraw_after_image()
+    vim.cmd('redraw!')
+    for _, ms in ipairs({ 100, 300 }) do
+        vim.defer_fn(function()
+            vim.cmd('redraw!')
+        end, ms)
+    end
+end
+
+-- Scroll the code window so the cursor line is its top row, and fit the diagram
+-- float into the rows below it.
+local function place_float(state)
+    local win = state.code_win
+    if not inline_shown(state) or not (win and vim.api.nvim_win_is_valid(win)) then
         return
     end
-    local win = state.inline_win
-    state.inline_win = nil
-    state.show_code = true
-    -- Terminals without kitty unicode placeholders (e.g. WezTerm) keep the image
-    -- on screen after its buffer leaves the window, so delete it explicitly.
-    -- after_show() attaches it again when the diagram comes back.
-    local image = image_module()
-    if image then
-        image.placement.clean(state.preview_buf)
-    end
-    vim.api.nvim_win_set_buf(win, state.src_buf)
-    if state.src_bufhidden then
-        vim.bo[state.src_buf].bufhidden = state.src_bufhidden
-        state.src_bufhidden = nil
-    end
-    if state.cursor then
-        pcall(vim.api.nvim_win_set_cursor, win, state.cursor)
-    end
-    vim.cmd('redraw!')
-    -- The image delete can reach the terminal after this redraw, and WezTerm
-    -- blanks the cells the image covered. Redraw again once it has gone through.
-    vim.defer_fn(function()
-        vim.cmd('redraw!')
-    end, 50)
-    if keys then
-        vim.api.nvim_feedkeys(keys, 'ni', false)
-    end
-end
-
-local function src_undo(state, cmd)
-    vim.api.nvim_buf_call(state.src_buf, function()
-        pcall(vim.cmd, cmd)
+    local lnum = vim.api.nvim_win_get_cursor(win)[1]
+    vim.api.nvim_win_call(win, function()
+        vim.fn.winrestview({ topline = lnum })
     end)
-    schedule_render_soon(state, 0)
+    local height = vim.api.nvim_win_get_height(win)
+    -- A wrapped cursor line takes more than one row.
+    local ok, text = pcall(vim.api.nvim_win_text_height, win, { start_row = lnum - 1, end_row = lnum - 1 })
+    local rows = math.min(ok and text.all or 1, height - 1)
+    vim.api.nvim_win_set_config(state.float_win, {
+        relative = 'win',
+        win = win,
+        row = rows,
+        col = 0,
+        width = vim.api.nvim_win_get_width(win),
+        height = math.max(1, height - rows),
+    })
 end
 
 local function ensure_preview_buf(state)
     if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
         return state.preview_buf
     end
-    local buf = vim.api.nvim_create_buf(false, true)
-    state.preview_buf = buf
-    pcall(vim.api.nvim_buf_set_name, buf, 'plantuml://preview/' .. state.src_buf)
-    vim.bo[buf].bufhidden = 'hide'
-    -- `:w` on the diagram writes the source file.
-    vim.bo[buf].buftype = 'acwrite'
-    vim.api.nvim_create_autocmd('BufWriteCmd', {
-        buffer = buf,
-        callback = function()
-            if vim.api.nvim_buf_is_valid(state.src_buf) then
-                vim.api.nvim_buf_call(state.src_buf, function()
-                    vim.cmd('write')
-                end)
-            end
-            vim.bo[buf].modified = false
-        end,
-    })
-    for _, key in ipairs(INSERT_KEYS) do
-        vim.keymap.set('n', key, function()
-            show_code(state, (vim.v.count > 0 and tostring(vim.v.count) or '') .. key)
-        end, { buffer = buf, nowait = true, desc = 'PlantUML: edit the code' })
-    end
-    vim.keymap.set('n', 'u', function()
-        src_undo(state, 'undo')
-    end, { buffer = buf, desc = 'PlantUML: undo in the code' })
-    vim.keymap.set('n', '<C-r>', function()
-        src_undo(state, 'redo')
-    end, { buffer = buf, desc = 'PlantUML: redo in the code' })
-    if M.config.keymaps then
-        vim.keymap.set('n', '<leader>up', function()
-            M.toggle(state.src_buf)
-        end, { buffer = buf, desc = 'PlantUML preview' })
-    end
-    return buf
+    state.preview_buf = vim.api.nvim_create_buf(false, true)
+    pcall(vim.api.nvim_buf_set_name, state.preview_buf, 'plantuml://preview/' .. state.src_buf)
+    vim.bo[state.preview_buf].bufhidden = 'hide'
+    return state.preview_buf
 end
 
--- Swap the window showing the code to the diagram. Waits for the first render
--- so the user never sees an empty window, and stays on the code when the buffer
--- has no @start/@end block.
+-- Close the diagram float so the whole code window shows again.
+local function hide_diagram(state)
+    if not inline_shown(state) then
+        return
+    end
+    -- Terminals without kitty unicode placeholders (e.g. WezTerm) keep the image
+    -- on screen after its window closes, so delete it explicitly. after_show()
+    -- attaches it again when the diagram comes back.
+    local image = image_module()
+    if image then
+        image.placement.clean(state.preview_buf)
+    end
+    pcall(vim.api.nvim_win_close, state.float_win, true)
+    state.float_win = nil
+    local win = state.code_win
+    state.code_win = nil
+    if win and vim.api.nvim_win_is_valid(win) and state.src_scrolloff then
+        pcall(vim.api.nvim_set_option_value, 'scrolloff', state.src_scrolloff, { scope = 'local', win = win })
+    end
+    state.src_scrolloff = nil
+    redraw_after_image()
+end
+
+-- Cover the code window with the diagram, leaving the cursor line visible as its
+-- top row. The cursor stays in the code, so normal-mode commands (dd, p, u, :w)
+-- work as usual. Waits for the first render so the user never sees an empty
+-- float, and does nothing when the buffer has no @start/@end block.
 function show_diagram(state)
     if inline_shown(state) or not vim.api.nvim_buf_is_valid(state.src_buf) then
         return
@@ -826,23 +812,22 @@ function show_diagram(state)
         return
     end
     ensure_preview_buf(state)
-    state.cursor = vim.api.nvim_win_get_cursor(win)
-    -- Keep the source buffer loaded while the diagram takes its window.
-    state.src_bufhidden = vim.bo[state.src_buf].bufhidden
-    vim.bo[state.src_buf].bufhidden = 'hide'
-    vim.api.nvim_win_set_buf(win, state.preview_buf)
-    for name, value in pairs({
-        number = false,
-        relativenumber = false,
-        signcolumn = 'no',
-        foldcolumn = '0',
-        cursorline = false,
-        list = false,
-        spell = false,
-    }) do
-        vim.wo[win][0][name] = value
-    end
-    state.inline_win = win
+    state.code_win = win
+    -- scrolloff would stop the cursor line from staying on the top row.
+    state.src_scrolloff = vim.api.nvim_get_option_value('scrolloff', { scope = 'local', win = win })
+    vim.api.nvim_set_option_value('scrolloff', 0, { scope = 'local', win = win })
+    state.float_win = vim.api.nvim_open_win(state.preview_buf, false, {
+        relative = 'win',
+        win = win,
+        row = 1,
+        col = 0,
+        width = vim.api.nvim_win_get_width(win),
+        height = math.max(1, vim.api.nvim_win_get_height(win) - 1),
+        focusable = false,
+        style = 'minimal',
+        zindex = 10,
+    })
+    place_float(state)
     after_show(state)
 end
 
@@ -851,7 +836,7 @@ local function split_open(state, position)
     if position ~= 'left' and position ~= 'top' and position ~= 'bottom' then
         position = 'right'
     end
-    show_code(state)
+    hide_diagram(state)
     ensure_preview_buf(state)
     local win = win_for(state.preview_buf)
     if win and position ~= state.position then
@@ -904,7 +889,8 @@ end
 
 local function preview_close(state)
     if inline_shown(state) then
-        show_code(state)
+        state.show_code = true
+        hide_diagram(state)
         return
     end
     if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
@@ -995,7 +981,59 @@ vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'InsertLeave', 'Buf
     callback = function(args)
         local state = states[args.buf]
         if state then
-            schedule_render(state)
+            if args.event == 'TextChanged' and inline_shown(state) then
+                -- A normal-mode edit (dd, p, u) under the diagram: update it soon
+                -- instead of waiting for a batch of edits.
+                schedule_render_soon(state)
+            else
+                schedule_render(state)
+            end
+        end
+    end,
+})
+
+-- Inline layout: insert mode shows the whole code window.
+vim.api.nvim_create_autocmd('InsertEnter', {
+    group = augroup,
+    callback = function(args)
+        local state = states[args.buf]
+        if state then
+            hide_diagram(state)
+        end
+    end,
+})
+
+-- Inline layout: keep the cursor line on the top row above the diagram.
+vim.api.nvim_create_autocmd('CursorMoved', {
+    group = augroup,
+    callback = function(args)
+        local state = states[args.buf]
+        if state and state.code_win == vim.api.nvim_get_current_win() then
+            place_float(state)
+        end
+    end,
+})
+
+-- Inline layout: drop the diagram when the code leaves its window or the window
+-- closes.
+vim.api.nvim_create_autocmd('BufWinLeave', {
+    group = augroup,
+    callback = function(args)
+        local state = states[args.buf]
+        if state then
+            hide_diagram(state)
+        end
+    end,
+})
+
+vim.api.nvim_create_autocmd({ 'WinClosed', 'QuitPre' }, {
+    group = augroup,
+    callback = function(args)
+        local win = args.event == 'WinClosed' and tonumber(args.match) or vim.api.nvim_get_current_win()
+        for _, state in pairs(states) do
+            if state.code_win == win then
+                hide_diagram(state)
+            end
         end
     end,
 })
@@ -1035,6 +1073,7 @@ vim.api.nvim_create_autocmd('WinResized', {
     group = augroup,
     callback = function()
         for _, state in pairs(states) do
+            place_float(state)
             if state.last_dims and state.preview_buf and win_for(state.preview_buf) then
                 if maybe_rescale(state) then
                     schedule_render_soon(state)
@@ -1075,26 +1114,6 @@ vim.api.nvim_create_autocmd('BufWipeout', {
                 state.display_timer:stop()
                 state.display_timer:close()
                 state.display_timer = nil
-            end
-        end
-    end,
-})
-
--- snacks.image writes into the preview buffer when it draws, which marks it as
--- modified. Clear that before Neovim checks for unsaved changes, or :q fails
--- with E37/E162.
-vim.api.nvim_create_autocmd({ 'QuitPre', 'ExitPre' }, {
-    group = augroup,
-    callback = function(args)
-        for _, state in pairs(states) do
-            -- The code is hidden behind the diagram, and :q! only discards changes
-            -- in the buffer the window shows. Put the code back so :q! drops its
-            -- changes and :q warns about the .puml file instead of the diagram.
-            if args.event == 'QuitPre' and state.inline_win == vim.api.nvim_get_current_win() then
-                show_code(state)
-            end
-            if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
-                vim.bo[state.preview_buf].modified = false
             end
         end
     end,

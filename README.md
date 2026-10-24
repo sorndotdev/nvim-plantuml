@@ -1,8 +1,9 @@
 # nvim-plantuml
 
-Live PlantUML preview for Neovim. In normal mode the window shows the diagram;
-in insert mode it shows the code. Leave insert mode and the diagram comes back,
-re-rendered with your changes. A side-by-side split is available too.
+Live PlantUML preview for Neovim. In normal mode the diagram covers the code
+window, except for the line under the cursor on the top row. In insert mode the
+whole code shows. Leave insert mode and the diagram comes back, re-rendered with
+your changes. A side-by-side split is available too.
 
 Rendering is driven by a persistent `plantuml -pipe` process and the PNG is
 shown with [snacks.nvim](https://github.com/folke/snacks.nvim) image support.
@@ -52,20 +53,29 @@ override the defaults. Initialization is automatic.
 ## Usage
 
 Open any `*.puml`, `*.plantuml`, or `*.iuml` file. Once the first render is
-done, the window switches from the code to the diagram. If the buffer has no
-`@start`/`@end` block yet, or the first render fails, you keep seeing the code.
+done, the diagram is drawn in a floating window over the code. If the buffer has
+no `@start`/`@end` block yet, or the first render fails, you keep seeing the code.
 
-On the diagram (normal mode):
+```
+┌──────────────────────────────────────┐
+│  6     +addBook(Book) : void         │  <- cursor line (real code)
+│ ┌──────────────────────────────────┐ │
+│ │                                  │ │
+│ │             diagram              │ │
+│ │                                  │ │
+│ └──────────────────────────────────┘ │
+└──────────────────────────────────────┘
+```
 
-| Key | Action |
+The cursor stays in the code the whole time, so every normal-mode command works
+as usual: `j`/`k` move to another line (it scrolls to the top row), `dd`, `p`,
+`u`, `/search`, `:w`, `:q!`. Normal-mode edits re-render the diagram right away.
+
+| Mode | What you see |
 | --- | --- |
-| `i` `a` `I` `A` `o` `O` `s` `S` `C` | Show the code and run that key, so you are in insert mode at the cursor where you left off |
-| `u` / `<C-r>` | Undo / redo in the code |
-| `:w` | Write the source file |
-| `<leader>up` | Show the code in normal mode (to move around, search, use `dd` etc.) |
-
-Leaving insert mode (`<Esc>`) shows the diagram again. After `<leader>up`, the
-code stays until you next leave insert mode or press `<leader>up` again.
+| Normal | The cursor line on top, the diagram below it |
+| Insert | The whole code |
+| After `<leader>up` | The whole code in normal mode, until you next leave insert mode or press `<leader>up` again |
 
 Set `layout = 'split'` to get the old behaviour: the diagram in a split next to
 the code, re-rendering as you type.
