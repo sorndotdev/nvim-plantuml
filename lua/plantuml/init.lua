@@ -750,6 +750,11 @@ local function show_code(state, keys)
         pcall(vim.api.nvim_win_set_cursor, win, state.cursor)
     end
     vim.cmd('redraw!')
+    -- The image delete can reach the terminal after this redraw, and WezTerm
+    -- blanks the cells the image covered. Redraw again once it has gone through.
+    vim.defer_fn(function()
+        vim.cmd('redraw!')
+    end, 50)
     if keys then
         vim.api.nvim_feedkeys(keys, 'ni', false)
     end
@@ -1080,8 +1085,14 @@ vim.api.nvim_create_autocmd('BufWipeout', {
 -- with E37/E162.
 vim.api.nvim_create_autocmd({ 'QuitPre', 'ExitPre' }, {
     group = augroup,
-    callback = function()
+    callback = function(args)
         for _, state in pairs(states) do
+            -- The code is hidden behind the diagram, and :q! only discards changes
+            -- in the buffer the window shows. Put the code back so :q! drops its
+            -- changes and :q warns about the .puml file instead of the diagram.
+            if args.event == 'QuitPre' and state.inline_win == vim.api.nvim_get_current_win() then
+                show_code(state)
+            end
             if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
                 vim.bo[state.preview_buf].modified = false
             end
