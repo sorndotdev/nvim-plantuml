@@ -734,6 +734,13 @@ local function show_code(state, keys)
     local win = state.inline_win
     state.inline_win = nil
     state.show_code = true
+    -- Terminals without kitty unicode placeholders (e.g. WezTerm) keep the image
+    -- on screen after its buffer leaves the window, so delete it explicitly.
+    -- after_show() attaches it again when the diagram comes back.
+    local image = image_module()
+    if image then
+        image.placement.clean(state.preview_buf)
+    end
     vim.api.nvim_win_set_buf(win, state.src_buf)
     if state.src_bufhidden then
         vim.bo[state.src_buf].bufhidden = state.src_bufhidden
@@ -742,6 +749,7 @@ local function show_code(state, keys)
     if state.cursor then
         pcall(vim.api.nvim_win_set_cursor, win, state.cursor)
     end
+    vim.cmd('redraw!')
     if keys then
         vim.api.nvim_feedkeys(keys, 'ni', false)
     end
