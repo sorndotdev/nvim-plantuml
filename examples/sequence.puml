@@ -1,0 +1,17 @@
+@startuml
+title Borrow a book (sequence diagram)
+
+actor Member
+participant Library
+database Catalog
+
+Member -> Library : borrow(isbn)
+Library -> Catalog : findBook(isbn)
+Catalog --> Library : book
+alt book is available
+    Library -> Catalog : markOnLoan(isbn)
+    Library --> Member : loan with due date
+else book is on loan
+    Library --> Member : not available
+end
+@enduml

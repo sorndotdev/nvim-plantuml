@@ -6,7 +6,10 @@
 --   :PlantUMLStop
 --
 -- Renders the first @start/@end block of a .puml buffer with a persistent
--- `plantuml -pipe` process and shows the PNG in a split via snacks.image.
+-- `plantuml -pipe` process and shows the PNG via snacks.image. With the default
+-- `layout = 'inline'` the diagram replaces the code in the same window while in
+-- normal mode, and the code comes back for insert mode. `layout = 'split'` shows
+-- the diagram in a split next to the code instead.
 --
 -- Rendering needs a PlantUML jar (run through `java`). The jar is downloaded on
 -- demand into `stdpath('data')/plantuml/` via :PlantUMLInstall, or you can point
@@ -40,6 +43,9 @@ M.config = {
     -- Path to GraphViz `dot` (needed by some diagram types). Auto-detected.
     graphviz = nil,
     args = { '-pipe', '-tpng', '-nometadata' },
+    -- 'inline': normal mode shows the diagram, insert mode shows the code, in the
+    -- same window. 'split': the diagram is shown in a split next to the code.
+    layout = 'inline',
     position = 'right',
     size = 0.4,
     auto_open = true,
@@ -53,8 +59,11 @@ M.config = {
 }
 
 local IEND = '\0\0\0\0IEND\xae\x42\x60\x82'
+-- Keys that, pressed on the inline diagram, bring the code back and start insert.
+local INSERT_KEYS = { 'i', 'a', 'I', 'A', 'o', 'O', 's', 'S', 'C' }
 local states = {}
 local render
+local show_diagram
 local session_id = string.format('%x-%x', vim.fn.getpid(), os.time())
 
 local function notify(msg, level)
@@ -487,6 +496,13 @@ local function on_png(state, png)
         vim.fn.delete(state.last_path)
     end
     state.last_path = display
+    if state.diagram_wanted then
+        state.diagram_wanted = false
+        local mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+        if not state.show_code and mode ~= 'i' and mode ~= 'R' then
+            show_diagram(state)
+        end
+    end
     if state.orig_path and state.orig_path ~= path then
         vim.fn.delete(state.orig_path)
     end
@@ -692,16 +708,138 @@ local function schedule_display(state)
     end))
 end
 
-local function preview_open(state, position)
+local function after_show(state)
+    if state.last_path then
+        refresh(state, state.last_path)
+        if maybe_rescale(state) then
+            schedule_render_soon(state)
+        else
+            schedule_display(state)
+        end
+    end
+end
+
+local function inline_shown(state)
+    local win = state.inline_win
+    return win and vim.api.nvim_win_is_valid(win) and state.preview_buf
+        and vim.api.nvim_win_get_buf(win) == state.preview_buf
+end
+
+-- Put the code back in the window that shows the inline diagram, then feed
+-- `keys` (e.g. `i`) so the user lands in insert mode.
+local function show_code(state, keys)
+    if not inline_shown(state) or not vim.api.nvim_buf_is_valid(state.src_buf) then
+        return
+    end
+    local win = state.inline_win
+    state.inline_win = nil
+    state.show_code = true
+    vim.api.nvim_win_set_buf(win, state.src_buf)
+    if state.src_bufhidden then
+        vim.bo[state.src_buf].bufhidden = state.src_bufhidden
+        state.src_bufhidden = nil
+    end
+    if state.cursor then
+        pcall(vim.api.nvim_win_set_cursor, win, state.cursor)
+    end
+    if keys then
+        vim.api.nvim_feedkeys(keys, 'ni', false)
+    end
+end
+
+local function src_undo(state, cmd)
+    vim.api.nvim_buf_call(state.src_buf, function()
+        pcall(vim.cmd, cmd)
+    end)
+    schedule_render_soon(state, 0)
+end
+
+local function ensure_preview_buf(state)
+    if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
+        return state.preview_buf
+    end
+    local buf = vim.api.nvim_create_buf(false, true)
+    state.preview_buf = buf
+    pcall(vim.api.nvim_buf_set_name, buf, 'plantuml://preview/' .. state.src_buf)
+    vim.bo[buf].bufhidden = 'hide'
+    -- `:w` on the diagram writes the source file.
+    vim.bo[buf].buftype = 'acwrite'
+    vim.api.nvim_create_autocmd('BufWriteCmd', {
+        buffer = buf,
+        callback = function()
+            if vim.api.nvim_buf_is_valid(state.src_buf) then
+                vim.api.nvim_buf_call(state.src_buf, function()
+                    vim.cmd('write')
+                end)
+            end
+            vim.bo[buf].modified = false
+        end,
+    })
+    for _, key in ipairs(INSERT_KEYS) do
+        vim.keymap.set('n', key, function()
+            show_code(state, (vim.v.count > 0 and tostring(vim.v.count) or '') .. key)
+        end, { buffer = buf, nowait = true, desc = 'PlantUML: edit the code' })
+    end
+    vim.keymap.set('n', 'u', function()
+        src_undo(state, 'undo')
+    end, { buffer = buf, desc = 'PlantUML: undo in the code' })
+    vim.keymap.set('n', '<C-r>', function()
+        src_undo(state, 'redo')
+    end, { buffer = buf, desc = 'PlantUML: redo in the code' })
+    if M.config.keymaps then
+        vim.keymap.set('n', '<leader>up', function()
+            M.toggle(state.src_buf)
+        end, { buffer = buf, desc = 'PlantUML preview' })
+    end
+    return buf
+end
+
+-- Swap the window showing the code to the diagram. Waits for the first render
+-- so the user never sees an empty window, and stays on the code when the buffer
+-- has no @start/@end block.
+function show_diagram(state)
+    if inline_shown(state) or not vim.api.nvim_buf_is_valid(state.src_buf) then
+        return
+    end
+    local win = vim.api.nvim_get_current_win()
+    if vim.api.nvim_win_get_buf(win) ~= state.src_buf then
+        win = win_for(state.src_buf)
+    end
+    if not win or not extract_diagram(state.src_buf) then
+        return
+    end
+    if not state.last_path then
+        state.diagram_wanted = true
+        return
+    end
+    ensure_preview_buf(state)
+    state.cursor = vim.api.nvim_win_get_cursor(win)
+    -- Keep the source buffer loaded while the diagram takes its window.
+    state.src_bufhidden = vim.bo[state.src_buf].bufhidden
+    vim.bo[state.src_buf].bufhidden = 'hide'
+    vim.api.nvim_win_set_buf(win, state.preview_buf)
+    for name, value in pairs({
+        number = false,
+        relativenumber = false,
+        signcolumn = 'no',
+        foldcolumn = '0',
+        cursorline = false,
+        list = false,
+        spell = false,
+    }) do
+        vim.wo[win][0][name] = value
+    end
+    state.inline_win = win
+    after_show(state)
+end
+
+local function split_open(state, position)
     position = position or M.config.position
     if position ~= 'left' and position ~= 'top' and position ~= 'bottom' then
         position = 'right'
     end
-    if not state.preview_buf or not vim.api.nvim_buf_is_valid(state.preview_buf) then
-        state.preview_buf = vim.api.nvim_create_buf(false, true)
-        pcall(vim.api.nvim_buf_set_name, state.preview_buf, 'plantuml://preview/' .. state.src_buf)
-        vim.bo[state.preview_buf].bufhidden = 'hide'
-    end
+    show_code(state)
+    ensure_preview_buf(state)
     local win = win_for(state.preview_buf)
     if win and position ~= state.position then
         vim.api.nvim_win_close(win, true)
@@ -739,18 +877,23 @@ local function preview_open(state, position)
             end,
         })
     end
-    if state.last_path then
-        refresh(state, state.last_path)
-        if maybe_rescale(state) then
-            schedule_render_soon(state)
-        else
-            schedule_display(state)
-        end
-    end
+    after_show(state)
     return win
 end
 
+local function preview_open(state, position)
+    if not position and M.config.layout == 'inline' then
+        state.show_code = false
+        return show_diagram(state)
+    end
+    return split_open(state, position)
+end
+
 local function preview_close(state)
+    if inline_shown(state) then
+        show_code(state)
+        return
+    end
     if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
         local image = image_module()
         if image then
@@ -779,7 +922,13 @@ local function setup_buffer(buf)
         vim.fn.delete(stale)
     end
     if M.config.auto_open then
-        preview_open(state)
+        if M.config.layout == 'inline' then
+            vim.schedule(function()
+                show_diagram(state)
+            end)
+        else
+            preview_open(state)
+        end
     end
     schedule_render_soon(state, 100)
     return state
@@ -834,6 +983,37 @@ vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'InsertLeave', 'Buf
         local state = states[args.buf]
         if state then
             schedule_render(state)
+        end
+    end,
+})
+
+-- Inline layout: leaving insert mode shows the diagram again.
+vim.api.nvim_create_autocmd('InsertLeave', {
+    group = augroup,
+    callback = function(args)
+        local state = states[args.buf]
+        if state and M.config.layout == 'inline' then
+            state.show_code = false
+            schedule_render_soon(state, 0)
+            vim.schedule(function()
+                show_diagram(state)
+            end)
+        end
+    end,
+})
+
+-- Inline layout: show the diagram when the code is opened in a window.
+vim.api.nvim_create_autocmd('BufWinEnter', {
+    group = augroup,
+    callback = function(args)
+        local state = states[args.buf]
+        if state and M.config.layout == 'inline' and M.config.auto_open and not state.show_code then
+            vim.schedule(function()
+                local mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+                if not state.show_code and mode ~= 'i' and mode ~= 'R' then
+                    show_diagram(state)
+                end
+            end)
         end
     end,
 })
@@ -917,14 +1097,14 @@ end, {
 
 vim.api.nvim_create_user_command('PlantUMLPreviewToggle', function()
     M.toggle()
-end, { desc = 'Toggle the PlantUML preview split' })
+end, { desc = 'Toggle the PlantUML preview' })
 
 vim.api.nvim_create_user_command('PlantUMLPreviewClose', function()
     local state = current_state()
     if state then
         preview_close(state)
     end
-end, { desc = 'Close the PlantUML preview split' })
+end, { desc = 'Close the PlantUML preview' })
 
 vim.api.nvim_create_user_command('PlantUMLStop', function()
     for _, state in pairs(states) do

@@ -1,0 +1,30 @@
+@startuml
+title Library (class diagram)
+
+class Library {
+    +name : String
+    +addBook(Book) : void
+    +findByAuthor(String) : List~Book~
+}
+
+class Book {
+    +isbn : String
+    +title : String
+    +author : String
+}
+
+class Member {
+    +id : int
+    +name : String
+}
+
+class Loan {
+    +dueDate : Date
+    +isOverdue() : boolean
+}
+
+Library "1" o-- "*" Book
+Library "1" o-- "*" Member
+Member "1" --> "*" Loan
+Loan --> Book
+@enduml

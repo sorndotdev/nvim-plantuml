@@ -1,7 +1,8 @@
 # nvim-plantuml
 
-Live PlantUML preview for Neovim. Edit a `.puml` file and watch the diagram
-update in a split as you type.
+Live PlantUML preview for Neovim. In normal mode the window shows the diagram;
+in insert mode it shows the code. Leave insert mode and the diagram comes back,
+re-rendered with your changes. A side-by-side split is available too.
 
 Rendering is driven by a persistent `plantuml -pipe` process and the PNG is
 shown with [snacks.nvim](https://github.com/folke/snacks.nvim) image support.
@@ -50,19 +51,35 @@ override the defaults. Initialization is automatic.
 
 ## Usage
 
-Open any `*.puml`, `*.plantuml`, or `*.iuml` file. A preview split opens
-automatically and re-renders as you edit.
+Open any `*.puml`, `*.plantuml`, or `*.iuml` file. Once the first render is
+done, the window switches from the code to the diagram. If the buffer has no
+`@start`/`@end` block yet, or the first render fails, you keep seeing the code.
+
+On the diagram (normal mode):
+
+| Key | Action |
+| --- | --- |
+| `i` `a` `I` `A` `o` `O` `s` `S` `C` | Show the code and run that key, so you are in insert mode at the cursor where you left off |
+| `u` / `<C-r>` | Undo / redo in the code |
+| `:w` | Write the source file |
+| `<leader>up` | Show the code in normal mode (to move around, search, use `dd` etc.) |
+
+Leaving insert mode (`<Esc>`) shows the diagram again. After `<leader>up`, the
+code stays until you next leave insert mode or press `<leader>up` again.
+
+Set `layout = 'split'` to get the old behaviour: the diagram in a split next to
+the code, re-rendering as you type.
 
 | Command | Description |
 | --- | --- |
-| `:PlantUMLPreview [right\|left\|top\|bottom]` | Open the preview split |
-| `:PlantUMLPreviewToggle` | Toggle the preview split |
-| `:PlantUMLPreviewClose` | Close the preview split |
+| `:PlantUMLPreview [right\|left\|top\|bottom]` | Show the diagram (with a position: open it in a split) |
+| `:PlantUMLPreviewToggle` | Switch between code and diagram (split layout: open/close the split) |
+| `:PlantUMLPreviewClose` | Show the code (split layout: close the split) |
 | `:PlantUMLStop` | Stop the render processes |
 | `:PlantUMLInstall` | Download `plantuml.jar` into `stdpath('data')` |
 | `:PlantUMLDebug` | Show resolved dependency paths |
 
-Default keymap: `<leader>up` toggles the preview in PlantUML buffers.
+Default keymap: `<leader>up` runs `:PlantUMLPreviewToggle` in PlantUML buffers.
 
 ## Configuration
 
@@ -77,9 +94,11 @@ require('plantuml').setup({
     java = 'java',        -- Java runtime (name on $PATH or a full path)
     graphviz = nil,       -- GraphViz `dot` (name on $PATH or a full path)
     args = { '-pipe', '-tpng', '-nometadata' },
-    position = 'right',   -- right | left | top | bottom
-    size = 0.4,           -- split size (fraction)
-    auto_open = true,     -- open the preview when a PlantUML buffer is shown
+    layout = 'inline',    -- inline: diagram in normal mode, code in insert mode
+                          -- split: diagram in a split next to the code
+    position = 'right',   -- split layout: right | left | top | bottom
+    size = 0.4,           -- split layout: split size (fraction)
+    auto_open = true,     -- show the diagram when a PlantUML buffer is opened
     debounce = 300,       -- idle ms before re-render
     batch_size = 10,      -- coalesce this many edits into one render
     batch_ttl = 2000,     -- max ms to wait before flushing a batch
