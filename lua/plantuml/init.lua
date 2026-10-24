@@ -1075,6 +1075,20 @@ vim.api.nvim_create_autocmd('BufWipeout', {
     end,
 })
 
+-- snacks.image writes into the preview buffer when it draws, which marks it as
+-- modified. Clear that before Neovim checks for unsaved changes, or :q fails
+-- with E37/E162.
+vim.api.nvim_create_autocmd({ 'QuitPre', 'ExitPre' }, {
+    group = augroup,
+    callback = function()
+        for _, state in pairs(states) do
+            if state.preview_buf and vim.api.nvim_buf_is_valid(state.preview_buf) then
+                vim.bo[state.preview_buf].modified = false
+            end
+        end
+    end,
+})
+
 vim.api.nvim_create_autocmd('VimLeavePre', {
     group = augroup,
     callback = function()
