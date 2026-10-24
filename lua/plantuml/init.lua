@@ -734,6 +734,21 @@ local function redraw_after_image()
     end
 end
 
+-- Editor-relative, so nvim_win_get_position() on the float (which snacks uses to
+-- place the image) gives its real row; for a window-relative float it gives 0,0
+-- and the image covered the cursor line. No border, whatever 'winborder' says.
+local function float_config(win, rows)
+    local pos = vim.api.nvim_win_get_position(win)
+    return {
+        relative = 'editor',
+        row = pos[1] + rows,
+        col = pos[2],
+        width = vim.api.nvim_win_get_width(win),
+        height = math.max(1, vim.api.nvim_win_get_height(win) - rows),
+        border = 'none',
+    }
+end
+
 -- Scroll the code window so the cursor line is its top row, and fit the diagram
 -- float into the rows below it.
 local function place_float(state)
@@ -749,14 +764,7 @@ local function place_float(state)
     -- A wrapped cursor line takes more than one row.
     local ok, text = pcall(vim.api.nvim_win_text_height, win, { start_row = lnum - 1, end_row = lnum - 1 })
     local rows = math.min(ok and text.all or 1, height - 1)
-    vim.api.nvim_win_set_config(state.float_win, {
-        relative = 'win',
-        win = win,
-        row = rows,
-        col = 0,
-        width = vim.api.nvim_win_get_width(win),
-        height = math.max(1, height - rows),
-    })
+    vim.api.nvim_win_set_config(state.float_win, float_config(win, rows))
 end
 
 local function ensure_preview_buf(state)
@@ -816,17 +824,11 @@ function show_diagram(state)
     -- scrolloff would stop the cursor line from staying on the top row.
     state.src_scrolloff = vim.api.nvim_get_option_value('scrolloff', { scope = 'local', win = win })
     vim.api.nvim_set_option_value('scrolloff', 0, { scope = 'local', win = win })
-    state.float_win = vim.api.nvim_open_win(state.preview_buf, false, {
-        relative = 'win',
-        win = win,
-        row = 1,
-        col = 0,
-        width = vim.api.nvim_win_get_width(win),
-        height = math.max(1, vim.api.nvim_win_get_height(win) - 1),
+    state.float_win = vim.api.nvim_open_win(state.preview_buf, false, vim.tbl_extend('force', float_config(win, 1), {
         focusable = false,
         style = 'minimal',
         zindex = 10,
-    })
+    }))
     place_float(state)
     after_show(state)
 end
